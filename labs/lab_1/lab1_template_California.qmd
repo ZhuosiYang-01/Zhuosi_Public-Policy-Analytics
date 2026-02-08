@@ -462,26 +462,6 @@ knitr::kable(
   caption = "Decision framework for algorithm implementation based on county-level income reliability."
 )
 ```
-```{r recommendations-data}
-high_confidence_names <- county_data %>%
-  filter(reliability_categories == "High Confidence") %>%
-  pull(county)
-
-cat(paste(high_confidence_names, collapse = ", "))
-
-mod_confidence_names <- county_data %>%
-  filter(reliability_categories == "Moderate Confidence") %>%
-  pull(county)
-
-cat(paste(mod_confidence_names, collapse = ", "))
-
-low_confidence_names <- county_data %>%
-  filter(reliability_categories == "Low Confidence") %>%
-  pull(county)
-
-cat(paste(low_confidence_names, collapse = ", "))
-
-```
 
 **Key Recommendations:**
 
