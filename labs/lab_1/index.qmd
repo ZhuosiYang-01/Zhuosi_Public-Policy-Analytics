@@ -480,7 +480,7 @@ Counties with moderate confidence data: Amador, Colusa, Del Norte, Glenn, Inyo, 
 These counties fall in the Moderate Confidence range (MOE% 5–10%), so automated decisions should be used with caution and paired with monitoring that checks whether small shifts in the income estimate (within the MOE range) would change rankings or eligibility outcomes. In practice, this means running sensitivity tests around key thresholds, tracking how often these counties move in or out of priority groups across updates, and reviewing with additional administrative/local data before actions are taken.
 
 3. **Counties needing alternative approaches:** 
-Counties with moderate confidence data: Alpine, Mono, Plumas, Sierra, Trinity.
+Counties with low confidence data: Alpine, Mono, Plumas, Sierra, Trinity.
 These counties fall in the Low Confidence category (MOE% > 10%), so relying on the ACS median income estimate alone creates a high risk of misranking. The Department should require manual review or secondary validation before automated actions are triggered, and consider pooling multiple years or using broader geographies. Where feasible, targeted outreach or supplemental surveying in these small-population counties can also reduce uncertainty over time.
 
 
