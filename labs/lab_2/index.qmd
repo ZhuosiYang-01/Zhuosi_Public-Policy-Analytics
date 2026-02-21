@@ -1,0 +1,1153 @@
+---
+title: "Lab 2: Spatial Analysis and Visualization"
+subtitle: "Healthcare Access and Equity in Pennsylvania"
+author: "Zhuosi Yang"
+date: today
+format: 
+  html:
+    code-fold: false
+    toc: true
+    toc-location: left
+    theme: cosmo
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+## Assignment Overview
+
+**Learning Objectives:**
+- Apply spatial operations to answer policy-relevant research questions
+- Integrate census demographic data with spatial analysis
+- Create publication-quality visualizations and maps
+- Work with spatial data from multiple sources
+- Communicate findings effectively for policy audiences
+
+---
+
+## Part 1: Healthcare Access for Vulnerable Populations
+
+### Research Question
+
+**Which Pennsylvania counties have the highest proportion of vulnerable populations (elderly + low-income) living far from hospitals?**
+
+Your analysis should identify counties that should be priorities for healthcare investment and policy intervention.
+
+### Required Analysis Steps
+
+Complete the following analysis, documenting each step with code and brief explanations:
+
+#### Step 1: Data Collection (5 points)
+
+Load the required spatial data:
+- Pennsylvania county boundaries
+- Pennsylvania hospitals (from lecture data)
+- Pennsylvania census tracts
+
+**Your Task:**
+```{r setup, echo=FALSE}
+# Load required packages
+library(sf)
+library(tidyverse)
+library(tigris)
+library(tidycensus)
+library(scales)
+library(patchwork)
+library(here)
+library(knitr)
+library(RColorBrewer)
+library(kableExtra)
+library(ggspatial)
+
+```
+
+```{r data-load, echo=TRUE, message=FALSE, warning=FALSE, results="hide"}
+# Load spatial data
+pa_counties <- st_read("data/Pennsylvania_County_Boundaries.shp")
+pa_hospitals <- st_read("data/hospitals.geojson")
+pa_tracts <- tracts(state = "PA", cb = TRUE, class = "sf")
+
+# Check that all data loaded correctly
+st_crs(pa_hospitals)
+st_crs(pa_tracts)
+st_crs(pa_counties)
+
+```
+
+```{r}
+data_summary <- tibble(
+  Dataset = c("Hospitals", "Census Tracts", "Counties"),
+  `Number of Features` = c(
+    nrow(pa_hospitals),
+    nrow(pa_tracts),
+    nrow(pa_counties)
+  )
+)
+
+data_summary %>%
+  mutate(`Number of Features` = scales::comma(`Number of Features`)) %>%
+  kable(
+    caption = "Summary of Loaded Spatial Datasets",
+    align = "c"
+  ) %>%
+  kable_styling(position = "center", full_width = FALSE)
+
+```
+
+**Questions to answer:**
+
+- How many hospitals are in your dataset?  
+  223
+  
+- How many census tracts?  
+  3445
+  
+- What coordinate reference system is each dataset in?  
+  Hospital: WGS84 (EPSG: 4326)  
+  PA census tracts: NAD83 (EPSG: 4269)  
+  PA counties: WGS 84 / Pseudo-Mercator (EPSG: 3857)
+  
+---
+
+#### Step 2: Get Demographic Data 
+
+Use `tidycensus` to download tract-level demographic data for Pennsylvania.
+
+**Required variables:**
+- Total population
+- Median household income
+- Population 65 years and over (you may need to sum multiple age categories)
+
+**Your Task:**
+```{r}
+# Get demographic data from ACS
+pa_acs <- get_acs(
+  geography = "tract",
+  state = "PA",
+  year = 2022,
+  survey = "acs5",
+  output = "wide",
+  variables = c(
+    total_pop = "B01003_001",
+    med_income = "B19013_001",
+    m_65_66 = "B01001_020",
+    m_67_69 = "B01001_021",
+    m_70_74 = "B01001_022",
+    m_75_79 = "B01001_023",
+    m_80_84 = "B01001_024",
+    m_85up  = "B01001_025",
+    f_65_66 = "B01001_044",
+    f_67_69 = "B01001_045",
+    f_70_74 = "B01001_046",
+    f_75_79 = "B01001_047",
+    f_80_84 = "B01001_048",
+    f_85up  = "B01001_049"
+  )
+)
+
+pa_acs <- pa_acs %>%
+  mutate(
+    pop_65plus =
+      m_65_66E + m_67_69E + m_70_74E +
+      m_75_79E + m_80_84E + m_85upE +
+      f_65_66E + f_67_69E + f_70_74E +
+      f_75_79E + f_80_84E + f_85upE
+  )
+
+pa_acs <- pa_acs %>%
+  select(
+    GEOID,
+    total_pop = total_popE,
+    med_income = med_incomeE,
+    pop_65plus
+  )
+
+# Join to tract boundaries
+pa_tracts_demo <- pa_tracts %>%
+  left_join(pa_acs, by = "GEOID")
+
+# How many tracts have missing income data?
+missing_income_n <- pa_tracts_demo %>%
+  st_drop_geometry() %>%
+  summarise(n_missing = sum(is.na(med_income)))
+
+missing_income_n %>%
+  kable(
+    caption = "Number of tracts with missing median income values",
+    col.names = "Number of Missing Tracts",
+    align = "c"
+  ) %>%
+  kable_styling(position = "center", full_width = FALSE)
+
+# What is the median income across all PA census tracts?
+median_income_pa <- pa_tracts_demo %>%
+  st_drop_geometry() %>%
+  summarise(median_income = median(med_income, na.rm = TRUE)) 
+
+median_income_pa %>%
+  mutate(median_income = scales::comma(median_income)) %>%
+  kable(
+    caption = "Median household income across Pennsylvania census tracts",
+    col.names = "Median Household Income (USD)",
+    align = "c"
+  ) %>%
+  kable_styling(
+    position = "center", full_width = FALSE)
+
+```
+
+
+**Questions to answer:**
+
+- What year of ACS data are you using?  
+  2022
+  
+- How many tracts have missing income data?  
+  62
+  
+- What is the median income across all PA census tracts?  
+  $70,188
+
+---
+
+#### Step 3: Define Vulnerable Populations 
+
+Identify census tracts with vulnerable populations based on TWO criteria:
+1. Low median household income (choose an appropriate threshold)
+2. Significant elderly population (choose an appropriate threshold)
+
+**Your Task:**
+```{r}
+# Filter for vulnerable tracts based on your criteria
+pa_tracts_demo <- pa_tracts_demo %>%
+  mutate(
+    elderly_share = pop_65plus / total_pop
+  )
+
+income_threshold <- quantile(pa_tracts_demo$med_income, 0.1, na.rm = TRUE)
+elderly_threshold <- 0.25
+
+vulnerable_tracts <- pa_tracts_demo %>%
+  filter(
+    !is.na(med_income),
+    !is.na(elderly_share),
+    med_income <= income_threshold |
+    elderly_share >= elderly_threshold
+  )
+
+summary_vulnerability <- tibble(
+  Number_of_Vulnerable_Tracts = nrow(vulnerable_tracts),
+  Percent_of_All_Tracts = percent(Number_of_Vulnerable_Tracts / nrow(pa_tracts_demo), accuracy = 0.01)
+)
+
+summary_vulnerability %>%
+  kable(
+    caption = "Vulnerable Census Tracts in Pennsylvania",
+    col.names = c("Number of Vulnerable Tracts",
+                  "Percent of Vulnerable Tracts"),
+    align = "c"
+  ) %>%
+  kable_styling(position = "center", full_width = FALSE)
+
+```
+
+**Questions to answer:**
+
+- What income threshold did you choose and why?  
+  I define low income as tracts in the bottom 10% of median household income statewide (≤ about $40,841). This focuses on the most economically disadvantaged communities and avoids labeling too many tracts as “vulnerable”.
+  
+- What elderly population threshold did you choose and why?  
+  I define a high elderly population as tracts where the 65+ share is ≥ 25%. In Pennsylvania, census tracts have an average 65+ share of 19.0%, and the 75th percentile is 23.1%. Based on this distribution, I use 25% to flag heavily aging communities, since it exceeds the upper-quartile benchmark and indicates unusually high healthcare need.
+  
+- How many tracts meet your vulnerability criteria?  
+  900
+  
+- What percentage of PA census tracts are considered vulnerable by your definition?  
+  26.12%
+
+---
+
+#### Step 4: Calculate Distance to Hospitals 
+
+For each vulnerable tract, calculate the distance to the nearest hospital.
+
+**Your Task:**
+```{r}
+# Transform to appropriate projected CRS
+vulnerable_tracts <- st_transform(vulnerable_tracts, 32129)
+pa_hospitals      <- st_transform(pa_hospitals, 32129)
+pa_counties <- st_transform(pa_counties, 32129)
+
+# Calculate distance from each tract centroid to nearest hospital
+centroids <- st_centroid(vulnerable_tracts)
+dist <- st_distance(centroids, pa_hospitals)
+min_dist_m <- apply(dist, 1, min)
+
+vulnerable_tracts$dist_to_hosp_miles <- as.numeric(min_dist_m) / 1609.344 # Convert meters to miles
+
+avg_dist <- mean(vulnerable_tracts$dist_to_hosp_miles, na.rm = TRUE)
+max_dist <- max(vulnerable_tracts$dist_to_hosp_miles, na.rm = TRUE)
+n_over15 <- sum(vulnerable_tracts$dist_to_hosp_miles > 15, na.rm = TRUE)
+
+distance_summary <- tibble(
+  Average_Distance_Miles = round(avg_dist, 2),
+  Maximum_Distance_Miles = round(max_dist, 2),
+  Tracts_Over_15_Miles = comma(n_over15)
+)
+
+distance_summary %>%
+  kable(
+    caption = "Hospital Access Distance Summary for Vulnerable Tracts",
+    col.names = c(
+      "Average Distance (miles)",
+      "Maximum Distance (miles)",
+      "Number of Tracts > 15 Miles"
+    ),
+    align = "c"
+  ) %>%
+  kable_styling(position = "center", full_width = FALSE)
+
+```
+
+**Requirements:**
+- Use an appropriate projected coordinate system for Pennsylvania
+- Calculate distances in miles
+- Explain why you chose your projection  
+
+  I use NAD83 / Pennsylvania State Plane South (EPSG: 32129). This is a projected coordinate system designed specifically for Pennsylvania, which minimizes distortion within the state and allows for accurate distance calculations. Using a geographic CRS would produce incorrect distance measurements. However, this projection uses meters as its unit, so I converted distances from meters to miles.
+
+**Questions to answer:**
+
+- What is the average distance to the nearest hospital for vulnerable tracts?  
+  3.97 miles
+  
+- What is the maximum distance?  
+  29.12 miles
+  
+- How many vulnerable tracts are more than 15 miles from the nearest hospital?  
+  25
+
+---
+
+#### Step 5: Identify Underserved Areas 
+
+Define "underserved" as vulnerable tracts that are more than 15 miles from the nearest hospital.
+
+**Your Task:**
+```{r}
+# Create underserved variable
+vulnerable_tracts <- vulnerable_tracts %>%
+  mutate(underserved = dist_to_hosp_miles > 15)
+
+n_underserved <- sum(vulnerable_tracts$underserved, na.rm = TRUE)
+pct_underserved <- mean(vulnerable_tracts$underserved, na.rm = TRUE)
+
+underserved_summary <- tibble(
+  Number_of_Underserved_Tracts = comma(n_underserved),
+  Percent_of_Vulnerable_Tracts = percent(pct_underserved, accuracy = 0.1)
+)
+
+underserved_summary %>%
+  kable(
+    caption = "Underserved Vulnerable Tracts",
+    col.names = c(
+      "Number of Underserved Tracts",
+      "Percent of Vulnerable Tracts"
+    ),
+    align = "c"
+  ) %>%
+  kable_styling(position = "center", full_width = FALSE)
+
+```
+
+**Questions to answer:**
+
+- How many tracts are underserved?  
+  25
+  
+- What percentage of vulnerable tracts are underserved?  
+  2.78%
+  
+- Does this surprise you? Why or why not?  
+  A total of 25 vulnerable tracts are classified as underserved, representing 2.78% of all vulnerable tracts. This relatively small proportion is not entirely surprising, given that Pennsylvania has a dense network of hospitals, particularly around metropolitan areas such as Philadelphia. It suggests that overall hospital coverage in Pennsylvania is strong, but it still highlights localized access gaps in rural areas.
+
+---
+
+#### Step 6: Aggregate to County Level
+
+Use spatial joins and aggregation to calculate county-level statistics about vulnerable populations and hospital access.
+
+**Your Task:**
+```{r}
+# Spatial join tracts to counties
+tract_pts <- st_point_on_surface(vulnerable_tracts)
+
+vuln_with_county <- st_join(
+  tract_pts,
+  pa_counties,
+  join = st_within
+)
+
+# Aggregate statistics by county
+county_stats <- vuln_with_county %>%
+  st_drop_geometry() %>%
+  group_by(COUNTY_NAM) %>%
+  summarise(
+    n_vulnerable_tracts = n(),
+    n_underserved_tracts = sum(underserved, na.rm = TRUE),
+    pct_underserved_vulnerable = n_underserved_tracts / n_vulnerable_tracts,
+    avg_dist_miles = mean(dist_to_hosp_miles, na.rm = TRUE),
+    total_vulnerable_pop = sum(total_pop, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+all_counties <- pa_counties %>%
+  st_drop_geometry() %>%
+  distinct(COUNTY_NAM)
+
+county_stats_full <- all_counties %>%
+  left_join(county_stats, by = "COUNTY_NAM") %>%
+  mutate(
+    n_vulnerable_tracts = replace_na(n_vulnerable_tracts, 0),
+    n_underserved_tracts = replace_na(n_underserved_tracts, 0),
+    pct_underserved_vulnerable = replace_na(pct_underserved_vulnerable, 0),
+    total_vulnerable_pop = replace_na(total_vulnerable_pop, 0)
+  )
+
+top5_pct_underserved <- county_stats_full %>%
+  arrange(desc(pct_underserved_vulnerable)) %>%
+  slice(1:5)
+
+top5_pct_underserved %>%
+  mutate(
+    pct_underserved_vulnerable = scales::percent(pct_underserved_vulnerable, accuracy = 0.1),
+    n_vulnerable_tracts = scales::comma(n_vulnerable_tracts),
+    n_underserved_tracts = scales::comma(n_underserved_tracts),
+    total_vulnerable_pop = scales::comma(total_vulnerable_pop),
+    avg_dist_miles = round(avg_dist_miles, 2)
+  ) %>%
+  select(
+    County = COUNTY_NAM,
+    `Vulnerable Tracts` = n_vulnerable_tracts,
+    `Underserved Tracts` = n_underserved_tracts,
+    `Percent Underserved` = pct_underserved_vulnerable,
+    `Total Vulnerable Population` = total_vulnerable_pop,
+    `Avg Distance (miles)` = avg_dist_miles
+  ) %>%
+  kable(
+    caption = "Top 5 Counties by Share of Underserved Vulnerable Tracts",
+    align = "c"
+  ) %>%
+  kable_styling(position = "center", full_width = FALSE)
+
+far_people_by_county <- vuln_with_county %>%
+  filter(underserved) %>%
+  st_drop_geometry() %>%
+  group_by(COUNTY_NAM) %>%
+  summarise(
+    vulnerable_people_far = sum(total_pop, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(vulnerable_people_far))
+
+far_people_by_county %>%
+  slice(1:5) %>%
+  mutate(
+    vulnerable_people_far = scales::comma(vulnerable_people_far)
+  ) %>%
+  select(
+    County = COUNTY_NAM,
+    `Vulnerable Population >15 Miles from Hospital` = vulnerable_people_far
+  ) %>%
+  kable(
+    caption = "Top 5 Counties by Number of Vulnerable Residents Living More Than 15 Miles from a Hospital",
+    align = "c"
+  ) %>%
+  kable_styling(position = "center", full_width = FALSE)
+
+```
+
+**Required county-level statistics:**
+- Number of vulnerable tracts
+- Number of underserved tracts
+- Percentage of vulnerable tracts that are underserved
+- Average distance to nearest hospital for vulnerable tracts
+- Total vulnerable population
+
+**Questions to answer:**
+
+- Which 5 counties have the highest percentage of underserved vulnerable tracts?  
+  Bradford, Sullivan, Cameron, Juniata, Forest
+  
+- Which counties have the most vulnerable people living far from hospitals?  
+  Pike
+  
+- Are there any patterns in where underserved counties are located?  
+  The counties with the highest percentage of underserved vulnerable tracts are small, largely rural counties, where hospitals are sparse and travel distances are longer. Pike may not have the highest underserved share, but it has a large enough vulnerable population in underserved areas that its absolute count is the highest. This suggests that the greatest number of vulnerable people living far from hospitals can occur in outer counties where population is substantial but hospital supply remains limited.
+  
+---
+
+#### Step 7: Create Summary Table 
+
+Create a professional table showing the top 10 priority counties for healthcare investment.
+
+**Your Task:**
+```{r}
+# Create and format priority counties table
+priority_data <- county_stats_full %>%
+  left_join(far_people_by_county, by = "COUNTY_NAM") %>%
+  mutate(
+    vulnerable_people_far = replace_na(vulnerable_people_far, 0)
+  )
+
+priority_table <- priority_data %>%
+  filter(n_vulnerable_tracts > 0) %>%
+  arrange(desc(pct_underserved_vulnerable),
+          desc(vulnerable_people_far)) %>%
+  slice(1:10) %>%
+  mutate(
+    County = COUNTY_NAM,
+    `Vulnerable Tracts` = n_vulnerable_tracts,
+    `Underserved Tracts` = n_underserved_tracts,
+    `% Underserved` = percent(pct_underserved_vulnerable, accuracy = 0.1),
+    `Avg Distance (mi)` = round(avg_dist_miles, 2),
+    `Vulnerable Pop` = comma(total_vulnerable_pop),
+    `Underserved Pop` = comma(vulnerable_people_far)
+  ) %>%
+  select(
+    County,
+    `Vulnerable Tracts`,
+    `Underserved Tracts`,
+    `% Underserved`,
+    `Avg Distance (mi)`,
+    `Vulnerable Pop`,
+    `Underserved Pop`
+  )
+
+priority_table %>%
+  kable(
+    caption = "Top 10 Priority Counties for Healthcare Investment in Pennsylvania",
+    align = "c"
+  ) %>%
+  kable_styling(position = "center", full_width = FALSE)
+
+```
+
+**Requirements:**
+- Use `knitr::kable()` or similar for formatting
+- Include descriptive column names
+- Format numbers appropriately (commas for population, percentages, etc.)
+- Add an informative caption
+- Sort by priority (you decide the metric)
+
+---
+
+## Part 2: Comprehensive Visualization 
+
+Using the skills from Week 3 (Data Visualization), create publication-quality maps and charts.
+
+### Map 1: County-Level Choropleth 
+
+Create a choropleth map showing healthcare access challenges at the county level.
+
+**Your Task:**
+```{r}
+# Create county-level access map
+pa_counties_map <- pa_counties %>%
+  left_join(county_stats_full, by = "COUNTY_NAM")
+
+bb <- st_bbox(pa_counties_map)
+x_pad <- (bb["xmax"] - bb["xmin"]) * 0.35
+
+ggplot() +
+  geom_sf(
+    data = pa_counties_map,
+    aes(fill = pct_underserved_vulnerable),
+    color = "white",
+    size = 0.2
+  ) +
+  geom_sf(
+    data = pa_hospitals,
+    aes(color = "Hospital"),
+    size = 1,
+    alpha = 0.8
+  ) +
+  
+  scale_fill_viridis_c(
+    option = "mako",
+    labels = scales::percent_format(accuracy = 1),
+    na.value = "grey90",
+    name = "% Vulnerable\nTracts Underserved"
+  ) +
+  
+  scale_color_manual(
+    values = c("Hospital" = "red"),
+    name = "" 
+  ) +
+  
+  labs(
+    title = "Healthcare Access Challenges in Pennsylvania",
+    subtitle = "Counties shaded by percent of vulnerable tracts located >15 miles from a hospital",
+    caption = "Data Source: ACS 5-year estimates"
+  ) +
+  
+  annotation_north_arrow(
+    location = "tr",
+    which_north = "true",
+    style = north_arrow_fancy_orienteering,
+    height = unit(0.9, "cm"),
+    width = unit(0.9, "cm")
+  ) +
+  
+  coord_sf(
+    xlim = c(bb["xmin"], bb["xmax"] + x_pad),
+    ylim = c(bb["ymin"], bb["ymax"]),
+    datum = NA,
+    expand = FALSE
+  ) +
+
+  theme_void() +
+  theme(
+    legend.position = c(0.8, 0.52),
+    legend.justification = c("left", "center"),
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(size = 10)
+  ) +
+
+  annotation_scale(
+    location = "br",
+    width_hint = 0.25,
+    unit_category = "imperial"
+  ) 
+
+```
+
+**Requirements:**
+- Fill counties by percentage of vulnerable tracts that are underserved
+- Include hospital locations as points
+- Use an appropriate color scheme
+- Include clear title, subtitle, and caption
+- Use `theme_void()` or similar clean theme
+- Add a legend with formatted labels
+
+---
+
+### Map 2: Detailed Vulnerability Map 
+
+Create a map highlighting underserved vulnerable tracts.
+
+**Your Task:**
+```{r}
+# Create detailed tract-level map
+ggplot() +
+  geom_sf(
+    data = pa_counties,
+    fill = NA,
+    aes(color = "County boundary"),
+    linewidth = 0.4
+  ) +
+  geom_sf(
+    data = pa_tracts,
+    aes(color = "Census tract"),
+    alpha = 0.25
+  ) +
+  geom_sf(
+    data = vulnerable_tracts %>% filter(underserved),
+    aes(fill = "Underserved vulnerable tract"),
+    color = NA,
+    alpha = 0.9
+  ) +
+  geom_sf(
+    data = pa_hospitals,
+    aes(color = "Hospital"),
+    size = 0.9,
+    alpha = 0.8
+  ) +
+  
+  scale_color_manual(
+    values = c(
+      "Hospital" = "red",
+      "Census tract" = "grey",
+      "County boundary" = "black"
+    ),
+    name = ""
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Underserved vulnerable tract" = "#2c7fb8"
+    ),
+    name = ""
+  ) +
+  
+  labs(
+    title = "Underserved Vulnerable Census Tracts in Pennsylvania",
+    subtitle = "Highlighted tracts are vulnerable and located >15 miles from the nearest hospital",
+    caption = "Data Source: ACS 5-year estimates"
+  ) +
+  
+  annotation_north_arrow(
+    location = "tr",
+    which_north = "true",
+    style = north_arrow_fancy_orienteering,
+    height = unit(0.9, "cm"),
+    width = unit(0.9, "cm")
+  ) +
+  
+  coord_sf(
+    xlim = c(bb["xmin"], bb["xmax"] + x_pad),
+    ylim = c(bb["ymin"], bb["ymax"]),
+    datum = NA,
+    expand = FALSE
+  ) +
+
+  theme_void() +
+  theme(
+    legend.position = c(0.8, 0.52),
+    legend.justification = c("left", "center"),
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(size = 10)
+  ) +
+
+  annotation_scale(
+    location = "br",
+    width_hint = 0.25,
+    unit_category = "imperial"
+  ) 
+```
+
+**Requirements:**
+- Show underserved vulnerable tracts in a contrasting color
+- Include county boundaries for context
+- Show hospital locations
+- Use appropriate visual hierarchy (what should stand out?)
+- Include informative title and subtitle
+
+---
+
+### Chart: Distribution Analysis
+
+Create a visualization showing the distribution of distances to hospitals for vulnerable populations.
+
+**Your Task:**
+```{r}
+# Create distribution visualization
+ggplot(vulnerable_tracts, aes(x = dist_to_hosp_miles)) +
+
+  geom_histogram(
+    bins = 30,
+    fill = "#2c7fb8",
+    color = "white",
+    alpha = 0.8
+  ) +
+
+  geom_vline(
+    xintercept = 15,
+    linetype = "dashed",
+    color = "red",
+    linewidth = 0.8
+  ) +
+
+  labs(
+    title = "Distribution of Distance to Nearest Hospital",
+    x = "Distance to Nearest Hospital (miles)",
+    y = "Number of Vulnerable Tracts",
+    caption = "Red dashed line indicates 15-mile underserved threshold.\nData Source: ACS 5-year estimates"
+  ) +
+
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold")
+  )
+
+```
+
+**Brief Interpretation:**  
+Most vulnerable tracts are located within 10 miles of a hospital. However, a small tail extends beyond the 15-mile threshold (red dashed line), indicating geographically isolated communities facing potential healthcare access challenges.
+
+
+**Suggested chart types:**
+- Histogram or density plot of distances
+- Box plot comparing distances across regions
+- Bar chart of underserved tracts by county
+- Scatter plot of distance vs. vulnerable population size
+
+**Requirements:**
+- Clear axes labels with units
+- Appropriate title
+- Professional formatting
+- Brief interpretation (1-2 sentences as a caption or in text)
+
+---
+
+## Part 3: Bring Your Own Data Analysis 
+
+Choose your own additional spatial dataset and conduct a supplementary analysis.
+
+**Note these are just loose suggestions to spark ideas - follow or make your own as the data permits and as your ideas evolve. This analysis should include bringing in your own dataset, ensuring the projection/CRS of your layers align and are appropriate for the analysis (not lat/long or geodetic coordinate systems). The analysis portion should include some combination of spatial and attribute operations to answer a relatively straightforward question**
+
+### Your Analysis
+
+**Your Task:**
+
+1. **Find and load additional data**
+   - Document your data source
+   - Check and standardize the CRS
+   - Provide basic summary statistics
+
+```{r wifi data, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+# Load your additional dataset
+wifi <- st_read("data/free_city_wifi_locations/free_city_wifi_locations.shp")
+
+internet <- get_acs(
+  geography = "tract",
+  state = "PA",
+  county = "Philadelphia",
+  output = "wide",
+  variables = c(
+    hh_total = "B28002_001",
+    hh_no_internet = "B28002_013"
+  ),
+  year = 2022,
+  survey = "acs5",
+  geometry = FALSE
+)
+
+phl_tracts <- tracts(
+  state = "PA",
+  county = "Philadelphia",
+  year = 2022,
+  cb = TRUE
+)
+
+st_crs(wifi)
+st_crs(phl_tracts)
+```
+
+```{r}
+wifi_summary <- tibble(
+  Dataset = c("Free Public Wi-Fi Locations", 
+              "ACS Internet Data", 
+              "Philadelphia Census Tracts"),
+  `Number of Features` = c(
+    nrow(wifi),
+    nrow(internet),
+    nrow(phl_tracts)
+  )
+)
+
+wifi_summary %>%
+  mutate(`Number of Features` = scales::comma(`Number of Features`)) %>%
+  kable(
+    caption = "Summary of Digital Equity Spatial Datasets (Philadelphia)",
+    align = "c"
+  ) %>%
+  kable_styling(position = "center", full_width = FALSE)
+
+```
+
+**Questions to answer:**
+
+- What dataset did you choose and why?  
+  I use three datasets: (1)Free Wi-Fi locations, (2) ACS tract-level data on households without internet access, (3) Philadelphia census tract boundaries.  
+  I selected these datasets to evaluate digital equity by comparing areas with high levels of internet disconnection to the spatial distribution of free Wi-Fi locations. Using Philly census tracts data allows me to analyze tract-level patterns and identify digital access gaps.
+  
+- What is the data source and date?  
+  The free Wi-Fi dataset is obtained from OpenDataPhilly. The data were last updated on February 12, 2026.  
+  Demographic data are obtained from the U.S. Census Bureau’s American Community Survey (ACS) 5-year estimates, 2022 release.  
+  Philadelphia census tract boundaries are downloaded using the tigris package.
+
+- How many features does it contain?  
+  The wifi dataset has 254 features. The internet_acs dataset and phl_tract both have 408 features.
+  
+- What CRS is it in? Did you need to transform it?  
+  Wifi: WGS 84 / Pseudo-Mercator (EPSG: 3857)  
+  Phl tracts: NAD83 (EPSG: 4269)  
+  I need to transform all spatial layers into a common projected coordinate system, NAD83 / Pennsylvania State Plane South (EPSG: 32129).
+  
+---
+
+2. **Pose a research question**  
+
+Do neighborhoods with high levels of household internet disconnection have adequate access to free public Wi-Fi locations?
+
+---
+
+3. **Conduct spatial analysis**
+
+Use at least TWO spatial operations to answer your research question.
+
+**Required operations (choose 2+):**
+- Buffers
+- Spatial joins
+- Spatial filtering with predicates
+- Distance calculations
+- Intersections or unions
+- Point-in-polygon aggregation
+
+**Your Task:**
+```{r}
+# Your spatial analysis
+# Transform to a projected CRS
+phl_tracts <- st_transform(phl_tracts, 32129)
+wifi <- st_transform(wifi, 32129)
+
+# Calculate % of hh without internet
+internet <- internet %>%
+  mutate(
+    pct_no_internet = hh_no_internetE / hh_totalE,
+    pct_no_internet = replace_na(pct_no_internet, 0)
+  )
+
+# Join acs data to tracts
+internet_tracts <- phl_tracts %>%
+  left_join(internet, by = "GEOID")
+
+# Define threshold for digital vulnerability
+internet_tracts <- internet_tracts %>%
+  mutate(
+    high_digital_vuln = pct_no_internet > 0.20
+  )
+
+# Set 0.5 mile buffer for each wifi location as its service area
+wifi_buf <- st_buffer(wifi, dist = 1609.34/2)%>%
+  st_union()
+wifi_buf <- st_sf(geometry = wifi_buf)
+
+# Intersect with tract area
+tract_intersection <- st_intersection(
+  internet_tracts %>% select(GEOID),
+  wifi_buf
+)
+
+# Calculate: wifi service area / tract area
+internet_tracts <- internet_tracts %>%
+  mutate(
+    tract_area = st_area(geometry)   # Calculate tract area
+  )
+
+cov_share <- tract_intersection %>%
+  mutate(int_area = st_area(geometry)) %>%    # Calculate the intersected area
+  st_drop_geometry() %>%
+  group_by(GEOID) %>%
+  summarise(int_area = sum(int_area), .groups = "drop")
+
+#  A tract is classified as a "gap" if less than 50% of its area is covered by the service area of free wifi
+internet_tracts <- internet_tracts %>%
+  left_join(cov_share, by = "GEOID") %>%
+  mutate(
+    int_area = as.numeric(int_area),
+    tract_area = as.numeric(tract_area),
+    int_area = replace_na(int_area, 0),
+    share_covered_05mi = int_area / tract_area,
+    gap_05mi = share_covered_05mi < 0.5
+  )
+
+# Wi-Fi coverage gap summary (all tracts)
+overall_summary <- internet_tracts %>%
+  st_drop_geometry() %>%
+  summarise(
+    total_tracts = n(),
+    total_gap = sum(gap_05mi, na.rm = TRUE),
+    Share_Gap = paste0(round(mean(gap_05mi, na.rm = TRUE) * 100, 2), "%"),
+    Mean_Coverage = paste0(round(mean(share_covered_05mi, na.rm = TRUE) * 100, 2), "%")
+  )
+
+kable(overall_summary, caption = "Overall Wi-Fi Coverage Summary")
+
+# Wi-Fi coverage gap summary (digitally vulnarable tracts)
+high_vuln_summary <- internet_tracts %>%
+  st_drop_geometry() %>%
+  summarise(
+    High_Vuln_Tracts = sum(high_digital_vuln, na.rm = TRUE),
+    High_Vuln_Gap = sum(high_digital_vuln & gap_05mi, na.rm = TRUE),
+    Share_High_Vuln_Gap = paste0(
+      round((High_Vuln_Gap / High_Vuln_Tracts) * 100, 2),"%"),
+    Mean_Coverage = paste0(round(mean(share_covered_05mi, na.rm = TRUE) * 100, 2), "%")
+  )
+
+kable(high_vuln_summary, caption = "Wi-Fi Coverage Among High Digital Vulnerability Tracts")
+
+```
+
+```{r}
+# Map 1. Digital Vulnerability by Census Tract
+ggplot() +
+  geom_sf(data = internet_tracts, aes(fill = pct_no_internet),
+          color = "grey70", linewidth = 0.1) +
+  geom_sf(data = internet_tracts %>% filter(high_digital_vuln),
+          fill = NA, color = "white", linewidth = 0.5) +
+  
+  scale_fill_continuous(
+    name = "% households\nwithout internet",
+    labels = percent_format(accuracy = 1)
+  ) +
+  
+  labs(
+    title = "Map 1. Digital Vulnerability by Census Tract, Philadelphia",
+    subtitle = "High digital vulnerability: % households without internet > 20% (outlined)",
+    caption = "Data: ACS 2022 5-year estimates."
+  ) + 
+  
+  annotation_scale(
+    location = "br",
+    width_hint = 0.3,
+    unit_category = "imperial"
+  ) +
+  
+  annotation_north_arrow(
+    location = "tl",
+    which_north = "true",
+    style = north_arrow_fancy_orienteering,
+    height = unit(0.9, "cm"),
+    width = unit(0.9, "cm")
+  ) +
+  
+  coord_sf(datum = NA) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold"),
+    panel.grid.major = element_blank(),
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+```
+
+```{r}
+# Map 2. Free Public Wi-Fi Service Area and Access Gap, Philadelphia
+high_vuln_gap <- internet_tracts %>%
+  filter(high_digital_vuln & gap_05mi)
+
+high_vuln <- internet_tracts %>%
+  filter(high_digital_vuln)
+
+ggplot() +
+  geom_sf(
+    data = internet_tracts,
+    aes(fill = "Census tract"),
+    color = "grey40",
+    linewidth = 0.15
+  ) +
+  geom_sf(
+    data = high_vuln,
+    aes(fill = "High vulnerability tract"),
+    color = "grey40",
+    linewidth = 0.15
+  ) +
+  geom_sf(
+    data = wifi_buf,
+    aes(color = "Wi-Fi service area (0.5 mile)"),
+    fill = "deepskyblue2",
+    alpha = 0.20,
+    linewidth = 0.5
+  ) +
+  geom_sf(
+    data = wifi,
+    aes(shape = "Free public Wi-Fi location"),
+    color = "white",
+    fill  = "black",
+    stroke = 0.5,
+    size = 1.5,
+    alpha = 0.95
+  ) +
+  geom_sf(
+    data = high_vuln_gap,
+    aes(color = "High-vulnerability gap tract"),
+    fill = NA,
+    linewidth = 0.7
+  ) +
+  
+  scale_fill_manual(
+    name = "",
+    values = c(
+      "Census tract" = "white",
+      "High vulnerability tract" = "grey60"
+    )
+  ) +
+  scale_color_manual(
+    name = "",
+    values = c(
+      "Wi-Fi service area (0.5 mile)" = "deepskyblue4",
+      "High-vulnerability gap tract" = "red"
+    )
+  ) +
+  scale_shape_manual(
+    name = "",
+    values = c("Free public Wi-Fi location" = 21)
+  ) +
+  
+  guides(
+    shape = guide_legend(order = 1),
+    fill  = guide_legend(order = 2),
+    color = guide_legend(order = 3)
+  ) +
+  
+  labs(
+    title = "Map 2. Free Public Wi-Fi Service Area and Access Gap, Philadelphia",
+    subtitle = "High vulnerability: % households without internet > 20%.\nGap tracts: <50% of tract area covered within 0.5 mile service area of free Wi-Fi.",
+    caption = "Data: OpenDataPhilly, ACS 2022 5-year estimates."
+  ) +
+  
+  annotation_scale(
+    location = "br",
+    width_hint = 0.3,
+    unit_category = "imperial"
+  ) +
+  
+  annotation_north_arrow(
+    location = "tl",
+    which_north = "true",
+    style = north_arrow_fancy_orienteering,
+    height = unit(0.9, "cm"),
+    width = unit(0.9, "cm")
+  ) +
+  
+  coord_sf(datum = NA) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold"),
+    panel.grid.major = element_blank(),
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    legend.position = "right"
+  )
+
+```
+
+
+**Analysis requirements:**
+- Clear code comments explaining each step
+- Appropriate CRS transformations
+- Summary statistics or counts
+- At least one map showing your findings
+- Brief interpretation of results (3-5 sentences)
+
+**Your interpretation:**
+
+Across Philadelphia, digital vulnerability is spatially clustered, with high-vulnerability tracts (% households without internet > 20%) concentrated mainly in West and North Philadelphia. (See Map 1.) Overlaying free public Wi-Fi locations and their 0.5-mile service areas suggests that coverage is broadly extensive and reaches most high-need areas. (See Map 2.) However, a small set of five high-vulnerability tracts remain “access gaps,” where more than 50% of tract area falls out of the Wi-Fi service coverage. Taken together, while the overall spatial distribution of Wi-Fi appears extensive, the presence of these uncovered vulnerable tracts indicates that coverage is not fully aligned with areas of highest need. Targeted placement of additional Wi-Fi sites in or near these specific gap tracts can improve digital equity outcomes.
+
+
+## Finally - A few comments about your incorporation of feedback!
+Take a few moments to clean up your markdown document and then write a line or two or three about how you may have incorporated feedback that you recieved after your first assignment. 
+
+**For some improvement on feedback:**
+
+First, instead of directly printing outputs, I used kable() to present summary tables in a more formal format. Second, while I chose to retain some guideline structure in the template for future review, I removed unnecessary guideline content such as examples to make it clearer. Third, I leaned how to hide setup code and package loading using `echo = FALSE`. Finally, I omitted the Census API installation step, as it is already configured locally and should not be shared publicly.
+
+---
+
+## Submission Requirements
+
+**What to submit:**
+
+1. **Rendered HTML document posted to your course portfolio** with all code, outputs, maps, and text
+   - Use `embed-resources: true` in YAML so it's a single file
+   - All code should run without errors
+   - All maps and charts should display correctly
+2. Submit the correct and working links of your assignment on Canvas
+
+---
+
