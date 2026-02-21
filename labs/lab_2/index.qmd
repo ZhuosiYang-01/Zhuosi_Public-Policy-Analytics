@@ -101,7 +101,7 @@ data_summary %>%
   223
   
 - How many census tracts?  
-  3445
+  3,445
   
 - What coordinate reference system is each dataset in?  
   Hospital: WGS84 (EPSG: 4326)  
@@ -280,7 +280,7 @@ pa_hospitals      <- st_transform(pa_hospitals, 32129)
 pa_counties <- st_transform(pa_counties, 32129)
 
 # Calculate distance from each tract centroid to nearest hospital
-centroids <- st_centroid(vulnerable_tracts)
+centroids <- st_point_on_surface(vulnerable_tracts)
 dist <- st_distance(centroids, pa_hospitals)
 min_dist_m <- apply(dist, 1, min)
 
