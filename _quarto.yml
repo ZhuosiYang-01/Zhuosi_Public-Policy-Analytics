@@ -22,6 +22,8 @@ website:
             text: "Lab 3: Presentation"
           - href: labs/lab_3/Yang_Zheng_Zhong_Zhou_Appendix.html
             text: "Lab 3: Appendix"
+          - href: labs/lab_4/
+            text: "Lab 4: Spatial Predictive Analysis"
 
 format:
   html:
