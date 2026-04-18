@@ -24,7 +24,8 @@ website:
             text: "Lab 3: Appendix"
           - href: labs/lab_4/
             text: "Lab 4: Spatial Predictive Analysis"
-
+          - href: labs/lab_5/
+            text: "Lab 5: Bikeshare SpaceTime Prediction"
 format:
   html:
     theme: cosmo
