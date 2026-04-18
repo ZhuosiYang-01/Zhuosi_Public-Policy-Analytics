@@ -3,6 +3,7 @@ title: "Bikeshare SpaceTime Prediction"
 subtitle: "CPLN 5080 - Spring 2026"
 author: "Zhuosi Yang"
 date: today
+description: "qmd file: <https://github.com/ZhuosiYang-01/Zhuosi/blob/main/labs/lab_5/index.qmd>"
 format:
   html:
     code-fold: show
